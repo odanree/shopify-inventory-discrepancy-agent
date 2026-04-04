@@ -33,6 +33,10 @@ class DiscrepancyState(TypedDict):
     mutation_applied: bool
     mutation_result: dict[str, Any] | None
 
+    # Set by verify_mutation node
+    verification_passed: bool | None
+    retry_count: int
+
     # Set by notify node
     slack_notified: bool
     sheets_row: str | None

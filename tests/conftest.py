@@ -73,6 +73,8 @@ def _make_state(**overrides):
         "approval_notes": None,
         "mutation_applied": False,
         "mutation_result": None,
+        "verification_passed": None,
+        "retry_count": 0,
         "slack_notified": False,
         "sheets_row": None,
         "tool_calls_log": [],

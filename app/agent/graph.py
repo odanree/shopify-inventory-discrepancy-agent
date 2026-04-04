@@ -1,7 +1,7 @@
 """Compiled LangGraph workflow for inventory discrepancy resolution.
 
 The graph stops (interrupts) BEFORE the apply_mutation node to require human approval.
-Resume via the /api/approvals/{run_id} endpoint.
+Resume via the /api/approvals/{run_id} endpoint or the Slack interactive message.
 
 Checkpointer is initialized at startup via init_graph(checkpointer) so that
 AsyncRedisSaver can be set up asynchronously in the FastAPI lifespan context.
@@ -16,6 +16,7 @@ from app.agent.nodes import (
     investigate,
     notify,
     propose_resolution,
+    verify_mutation,
 )
 from app.agent.state import DiscrepancyState
 from app.models.discrepancy import ResolutionProposal
@@ -23,6 +24,19 @@ from app.models.discrepancy import ResolutionProposal
 # Module-level graph reference — set by init_graph() during app startup.
 # None until init_graph() is called; accessing it before that raises AttributeError.
 graph = None
+
+
+def _route_after_verify(state: DiscrepancyState) -> str:
+    """Route after verify_mutation:
+    - passed → notify
+    - failed + retries remaining → apply_mutation (cycle back)
+    - failed + max retries → notify (proceed with failure recorded in state)
+    """
+    if state.get("verification_passed"):
+        return "notify"
+    if state.get("retry_count", 0) >= 2:
+        return "notify"  # best effort: audit the failure rather than looping forever
+    return "apply_mutation"
 
 
 def build_graph(checkpointer):
@@ -37,6 +51,7 @@ def build_graph(checkpointer):
     builder.add_node("investigate", investigate)
     builder.add_node("propose", propose_resolution)
     builder.add_node("apply_mutation", apply_mutation)
+    builder.add_node("verify", verify_mutation)
     builder.add_node("notify", notify)
     builder.add_node("audit", audit)
 
@@ -44,7 +59,8 @@ def build_graph(checkpointer):
     builder.add_edge("detect", "investigate")
     builder.add_edge("investigate", "propose")
     builder.add_edge("propose", "apply_mutation")
-    builder.add_edge("apply_mutation", "notify")
+    builder.add_edge("apply_mutation", "verify")
+    builder.add_conditional_edges("verify", _route_after_verify)
     builder.add_edge("notify", "audit")
     builder.add_edge("audit", END)
 
@@ -96,7 +112,7 @@ async def resume_workflow(
 ) -> DiscrepancyState:
     """Resume after human approval decision.
 
-    If approved=True, the graph runs apply_mutation → notify → audit.
+    If approved=True, the graph runs apply_mutation → verify → notify → audit.
     If approved=False, apply_mutation skips the mutation and the flow continues to audit.
 
     Note: graph.ainvoke(None, config) is the LangGraph API for resuming from an

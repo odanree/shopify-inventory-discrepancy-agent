@@ -75,10 +75,6 @@ async def test_full_workflow_approved_path():
     )
     tools._shopify_client = mock_shopify
 
-    mock_slack = AsyncMock()
-    mock_slack.post_inventory_alert = AsyncMock(return_value=True)
-    tools._slack_client = mock_slack
-
     mock_sheets = AsyncMock()
     mock_sheets.find_row_by_run_id = AsyncMock(return_value=None)
     mock_sheets.append_row = AsyncMock(return_value={"updates": {"updatedRange": "A10"}})

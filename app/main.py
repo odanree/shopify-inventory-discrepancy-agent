@@ -46,7 +46,9 @@ async def lifespan(app: FastAPI):
     from app.services.idempotency import IdempotencyService
     from app.services.slack_client import SlackClient
     from app.services.google_sheets import GoogleSheetsClient
+    from app.services.event_router import EventRouter, NotificationWorker
     from app.agent.tools import inject_tool_dependencies
+    from app.agent.nodes import inject_event_router
     from app.agent.graph import init_graph
     from app.db.session import AsyncSessionLocal
 
@@ -84,13 +86,20 @@ async def lifespan(app: FastAPI):
     # Proposal cache: run_id → proposal dict (in-memory, supplements checkpoint state)
     app.state.proposal_cache = {}
 
+    app.state.event_router = EventRouter(app.state.redis)
+    inject_event_router(app.state.event_router)
+
     inject_tool_dependencies(
         shopify=app.state.shopify,
-        slack=app.state.slack,
         sheets=app.state.sheets,
         db_factory=AsyncSessionLocal,
         idempotency=app.state.idempotency,
-        redis=app.state.redis,
+    )
+
+    # Start notification worker as background asyncio task
+    worker = NotificationWorker(app.state.redis, app.state.slack)
+    app.state.notification_task = asyncio.create_task(
+        worker.run(settings), name="notification-worker"
     )
 
     # Start scheduler as background task (fires reconciliation on interval)
@@ -101,6 +110,12 @@ async def lifespan(app: FastAPI):
 
     logger.info("startup_complete", env=settings.app_env)
     yield
+
+    app.state.notification_task.cancel()
+    try:
+        await app.state.notification_task
+    except asyncio.CancelledError:
+        pass
 
     if app.state.scheduler_task is not None:
         app.state.scheduler_task.cancel()
@@ -129,9 +144,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-from app.routers import discrepancies, approvals, health, inventory_webhook  # noqa: E402
+from app.routers import discrepancies, approvals, health, inventory_webhook, slack_actions  # noqa: E402
 
 app.include_router(discrepancies.router)
 app.include_router(approvals.router)
 app.include_router(health.router)
 app.include_router(inventory_webhook.router)
+app.include_router(slack_actions.router)

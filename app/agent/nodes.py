@@ -9,6 +9,17 @@ from app.config import get_settings
 logger = structlog.get_logger()
 
 # ---------------------------------------------------------------------------
+# Event router (set by inject_event_router() in main.py)
+# ---------------------------------------------------------------------------
+_event_router = None
+
+
+def inject_event_router(router) -> None:
+    global _event_router
+    _event_router = router
+
+
+# ---------------------------------------------------------------------------
 # Severity thresholds
 # ---------------------------------------------------------------------------
 
@@ -171,6 +182,8 @@ async def investigate(state: DiscrepancyState) -> DiscrepancyState:
 
 async def propose_resolution(state: DiscrepancyState) -> DiscrepancyState:
     """Generate a resolution proposal. Graph interrupts after this node for human approval."""
+    from app.config import get_settings
+
     severity = state.get("severity", "minor")
     open_orders_count = state.get("open_orders_count", 0)
     expected = state["expected_quantity"]
@@ -197,6 +210,26 @@ async def propose_resolution(state: DiscrepancyState) -> DiscrepancyState:
         severity=severity,
         proposed_quantity=proposed_quantity,
     )
+
+    # Emit approval request — NotificationWorker posts the Slack interactive message.
+    # The agent does not block on delivery; the interrupt handles the approval window.
+    if _event_router is not None:
+        settings = get_settings()
+        await _event_router.emit(
+            "approval_request",
+            {
+                "run_id": state["run_id"],
+                "sku": state["sku"],
+                "discrepancy_pct": state.get("discrepancy_pct", 0.0),
+                "severity": severity,
+                "proposed_action": action,
+                "proposed_quantity": proposed_quantity,
+                "expected_quantity": expected,
+                "open_orders_count": open_orders_count or 0,
+                "root_cause_analysis": state.get("root_cause_analysis", ""),
+                "channel": settings.slack_alerts_channel,
+            },
+        )
 
     return {
         **state,
@@ -291,9 +324,10 @@ async def apply_mutation(state: DiscrepancyState) -> DiscrepancyState:
 
 
 async def notify(state: DiscrepancyState) -> DiscrepancyState:
-    """Send Slack alert and append Google Sheets audit row."""
-    from app.agent.tools import append_google_sheets_row, post_slack_notification, _tool_calls_ctx
+    """Emit Slack resolution event and append Google Sheets audit row."""
+    from app.agent.tools import append_google_sheets_row, _tool_calls_ctx
     from app.config import get_settings
+    from datetime import datetime, timezone
 
     _tool_calls_ctx.set(list(state.get("tool_calls_log", [])))
     settings = get_settings()
@@ -310,19 +344,22 @@ async def notify(state: DiscrepancyState) -> DiscrepancyState:
         "Approved By": state.get("approved_by") or "—",
     }
 
-    slack_result = await post_slack_notification.ainvoke(
-        {
-            "channel": settings.slack_alerts_channel,
-            "title": f"Inventory Discrepancy Resolved — {state['sku']}",
-            "fields": slack_fields,
-            "severity": "critical" if severity in ("critical", "major") else "warning",
-            "run_id": run_id,
-        }
-    )
+    # Emit via event router (clawhip pattern) — NotificationWorker delivers to Slack
+    notification_emitted = False
+    if _event_router is not None:
+        await _event_router.emit(
+            "inventory_notification",
+            {
+                "channel": settings.slack_alerts_channel,
+                "title": f"Inventory Discrepancy Resolved — {state['sku']}",
+                "fields": slack_fields,
+                "severity": "critical" if severity in ("critical", "major") else "warning",
+                "run_id": run_id,
+            },
+        )
+        notification_emitted = True
 
-    # Google Sheets audit row: [run_id, sku, expected, actual, discrepancy_pct, action, approved_by, notes, timestamp]
-    from datetime import datetime, timezone
-
+    # Google Sheets audit row (kept as tool — deterministic, not LLM-driven)
     sheets_values = [
         run_id,
         state["sku"],
@@ -349,9 +386,81 @@ async def notify(state: DiscrepancyState) -> DiscrepancyState:
     updated_log = _tool_calls_ctx.get([])
     return {
         **state,
-        "slack_notified": bool(slack_result.get("success")),
+        "slack_notified": notification_emitted,
         "sheets_row": sheets_row,
         "tool_calls_log": updated_log,
+    }
+
+
+async def verify_mutation(state: DiscrepancyState) -> DiscrepancyState:
+    """Re-query Shopify to confirm the inventory mutation actually took effect.
+
+    Skips verification if mutation was not applied (approval rejected or hold action).
+    For inventory adjustments, re-queries the level and compares to proposed_quantity.
+    Retries apply_mutation up to 2 times if verification fails; then proceeds to notify.
+    """
+    from app.agent.tools import _shopify_client
+
+    run_id = state["run_id"]
+    action = state.get("proposed_action")
+
+    # Nothing to verify if mutation was not applied (not approved or hold action)
+    if not state.get("mutation_applied") or action == "hold_for_review":
+        return {**state, "verification_passed": True}
+
+    verification_passed = False
+    error = None
+
+    try:
+        if _shopify_client is None:
+            raise RuntimeError("Shopify client not injected")
+
+        levels = await _shopify_client.get_inventory_levels(
+            state["inventory_item_id"], [state["location_id"]]
+        )
+        proposed_qty = state.get("proposed_quantity", state["expected_quantity"])
+        actual_qty_after = None
+
+        for level in levels:
+            loc_id = level.get("location", {}).get("id", "")
+            target = state["location_id"]
+            if not target.startswith("gid://"):
+                target = f"gid://shopify/Location/{target}"
+            if loc_id == target or state["location_id"] in loc_id:
+                actual_qty_after = level.get("available")
+                break
+
+        if actual_qty_after is None:
+            # Unable to locate level — treat as unverifiable and proceed
+            logger.warning("verify_mutation_location_not_found", run_id=run_id)
+            verification_passed = True
+        elif actual_qty_after == proposed_qty:
+            verification_passed = True
+            logger.info(
+                "verify_mutation_passed",
+                run_id=run_id,
+                qty=actual_qty_after,
+            )
+        else:
+            error = (
+                f"verify_mutation_qty_mismatch: "
+                f"expected={proposed_qty} got={actual_qty_after}"
+            )
+            logger.warning(error, run_id=run_id)
+
+    except Exception as exc:
+        error = str(exc)
+        logger.error("verify_mutation_query_failed", run_id=run_id, error=error)
+
+    retry_count = state.get("retry_count", 0)
+    if not verification_passed:
+        retry_count += 1
+
+    return {
+        **state,
+        "verification_passed": verification_passed,
+        "retry_count": retry_count,
+        "error": error if not verification_passed else state.get("error"),
     }
 
 

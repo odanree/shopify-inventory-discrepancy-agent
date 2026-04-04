@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     # Slack
     slack_webhook_url: str = ""
     slack_alerts_channel: str = "#inventory-alerts"
+    slack_signing_secret: str = ""  # for verifying interactive action callbacks
 
     # LangFuse tracing
     langfuse_public_key: str = ""

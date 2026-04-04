@@ -17,11 +17,9 @@ logger = structlog.get_logger()
 # Injected service references
 # ---------------------------------------------------------------------------
 _shopify_client = None
-_slack_client = None
 _sheets_client = None
 _db_factory = None
 _idempotency_service = None
-_redis_client = None
 
 # Context var: must be True before adjust_inventory_level will execute
 _approval_granted_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -34,15 +32,12 @@ _tool_calls_ctx: contextvars.ContextVar[list[dict]] = contextvars.ContextVar(
 )
 
 
-def inject_tool_dependencies(shopify, slack, sheets, db_factory, idempotency, redis=None):
-    global _shopify_client, _slack_client, _sheets_client, _db_factory
-    global _idempotency_service, _redis_client
+def inject_tool_dependencies(shopify, sheets, db_factory, idempotency):
+    global _shopify_client, _sheets_client, _db_factory, _idempotency_service
     _shopify_client = shopify
-    _slack_client = slack
     _sheets_client = sheets
     _db_factory = db_factory
     _idempotency_service = idempotency
-    _redis_client = redis
 
 
 def _log_call(tool_name: str, args: dict, result: Any, success: bool):
@@ -86,14 +81,6 @@ class AdjustInventoryArgs(BaseModel):
 class UpdateOrderTagsHoldArgs(BaseModel):
     order_ids: list[str]
     tags: list[str]
-
-
-class PostSlackArgs(BaseModel):
-    channel: str
-    title: str
-    fields: dict = Field(default_factory=dict)
-    severity: str = "info"
-    run_id: str = ""
 
 
 class AppendSheetsRowArgs(BaseModel):
@@ -227,32 +214,6 @@ async def update_order_tags_for_hold(order_ids: list[str], tags: list[str]) -> d
         return result
 
 
-@tool(args_schema=PostSlackArgs)
-async def post_slack_notification(
-    channel: str, title: str, fields: dict, severity: str = "info", run_id: str = ""
-) -> dict:
-    """Post a Slack Block Kit inventory alert."""
-    args = {"channel": channel, "title": title, "severity": severity, "run_id": run_id}
-    try:
-        if _slack_client is None:
-            raise RuntimeError("Slack client not injected")
-        success = await _slack_client.post_inventory_alert(
-            channel=channel,
-            title=title,
-            fields=fields,
-            severity=severity,
-            run_id=run_id,
-            redis_client=_redis_client,
-        )
-        result = {"success": success}
-        _log_call("post_slack_notification", args, result, success)
-        return result
-    except Exception as exc:
-        result = {"success": False, "error": str(exc)}
-        _log_call("post_slack_notification", args, result, False)
-        return result
-
-
 @tool(args_schema=AppendSheetsRowArgs)
 async def append_google_sheets_row(spreadsheet_id: str, values: list) -> dict:
     """Append an audit row to Google Sheets."""
@@ -337,7 +298,6 @@ ALL_TOOLS = [
     get_open_orders_for_sku,
     adjust_inventory_level,
     update_order_tags_for_hold,
-    post_slack_notification,
     append_google_sheets_row,
     write_audit_record,
 ]
