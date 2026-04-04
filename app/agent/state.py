@@ -47,6 +47,9 @@ class DiscrepancyState(TypedDict):
     slack_notified: bool
     sheets_row: str | None
 
+    # Set when agent_mode == "shadow": mutations skipped, full graph still runs
+    shadowed: bool | None
+
     # Metadata
     tool_calls_log: list[dict[str, Any]]
     error: str | None

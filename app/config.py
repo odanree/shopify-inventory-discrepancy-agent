@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     # Admin
     admin_api_key: str = ""  # if empty, admin endpoints require no auth (dev only)
 
+    # Agent mode: "live" | "shadow"
+    # shadow = full graph execution but all Shopify write mutations are skipped
+    agent_mode: str = "live"
+
+    # Sentry error monitoring (leave blank to disable)
+    sentry_dsn: str = ""
+
     # App
     app_env: str = "development"
     log_level: str = "INFO"

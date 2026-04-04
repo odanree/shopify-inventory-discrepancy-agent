@@ -78,6 +78,7 @@ def _make_state(**overrides):
         "mutation_result": None,
         "verification_passed": None,
         "retry_count": 0,
+        "shadowed": None,
         "slack_notified": False,
         "sheets_row": None,
         "tool_calls_log": [],

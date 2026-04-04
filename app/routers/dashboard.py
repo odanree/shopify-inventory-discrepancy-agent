@@ -22,6 +22,8 @@ _SEVEN_DAYS = timedelta(days=7)
 
 @router.get("/api/dashboard/stats")
 async def get_stats(request: Request):
+    from app.config import get_settings
+    settings = get_settings()
     seven_days_ago = datetime.now(timezone.utc) - _SEVEN_DAYS
 
     async with AsyncSessionLocal() as session:
@@ -82,6 +84,7 @@ async def get_stats(request: Request):
 
     return {
         "window": "7d",
+        "shadow_mode": settings.agent_mode == "shadow",
         "total_processed": total,
         "pending_approvals": pending_count or 0,
         "approval_rate_pct": approval_rate,
@@ -163,9 +166,15 @@ _DASHBOARD_HTML = dedent("""\
   .pct-high { color: #f87171; }
   .pct-med { color: #facc15; }
   .pct-low { color: #4ade80; }
+  .shadow-banner { background: #78350f; border-bottom: 2px solid #d97706;
+                   padding: .6rem 2rem; font-size: .8rem; font-weight: 600;
+                   color: #fde68a; letter-spacing: .03em; display: none; }
 </style>
 </head>
 <body>
+<div class="shadow-banner" id="shadow-banner">
+  ⚠ SHADOW MODE — mutations are logged but not applied to Shopify
+</div>
 <header>
   <h1>📦 Inventory Discrepancy Agent</h1>
   <span class="refresh" id="last-updated">Loading…</span>
@@ -238,6 +247,7 @@ async function load() {
     const d = await r.json();
     document.getElementById('last-updated').textContent =
       'Last updated: ' + new Date().toLocaleTimeString();
+    document.getElementById('shadow-banner').style.display = d.shadow_mode ? 'block' : 'none';
 
     const pendingColor = d.pending_approvals > 0 ? 'yellow' : 'green';
     document.getElementById('cards').innerHTML = `

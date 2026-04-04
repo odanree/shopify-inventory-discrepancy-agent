@@ -315,20 +315,41 @@ async def apply_mutation(state: DiscrepancyState) -> DiscrepancyState:
 
     run_id = state["run_id"]
     approval = state.get("approval_granted")
+    action = state.get("proposed_action")
 
     if approval is not True:
         logger.info("apply_mutation_skipped_not_approved", run_id=run_id, approval=approval)
         return {
             **state,
             "mutation_applied": False,
+            "shadowed": False,
             "mutation_result": {"skipped": True, "reason": "not_approved"},
+        }
+
+    # Shadow mode: log the full intended mutation but skip it
+    settings = get_settings()
+    if settings.agent_mode == "shadow":
+        logger.info(
+            "apply_mutation_shadowed",
+            run_id=run_id,
+            action=action,
+            proposed_quantity=state.get("proposed_quantity"),
+            transfer_from=state.get("transfer_from_location_id"),
+            transfer_qty=state.get("transfer_quantity"),
+        )
+        return {
+            **state,
+            "mutation_applied": False,
+            "shadowed": True,
+            "mutation_result": {"shadow": True, "would_have": action},
+            "tool_calls_log": state.get("tool_calls_log", []),
+            "error": None,
         }
 
     # Set the approval context var so the tool will execute
     _approval_granted_ctx.set(True)
     _tool_calls_ctx.set(list(state.get("tool_calls_log", [])))
 
-    action = state.get("proposed_action")
     error = None
     mutation_result = None
 
@@ -402,6 +423,7 @@ async def apply_mutation(state: DiscrepancyState) -> DiscrepancyState:
     return {
         **state,
         "mutation_applied": error is None,
+        "shadowed": False,
         "mutation_result": mutation_result,
         "tool_calls_log": updated_log,
         "error": error,
@@ -584,6 +606,24 @@ async def audit(state: DiscrepancyState) -> DiscrepancyState:
     # Clean up pending workflow state
     if _idempotency_service is not None:
         await _idempotency_service.delete_workflow_state(state["run_id"])
+
+    # Capture mutation failures to Sentry
+    if state.get("error") and state.get("mutation_applied") is False and not state.get("shadowed"):
+        try:
+            import sentry_sdk
+            sentry_sdk.capture_message(
+                f"Inventory mutation failed: {state['sku']}",
+                level="error",
+                extras={
+                    "run_id": state["run_id"],
+                    "sku": state["sku"],
+                    "proposed_action": state.get("proposed_action"),
+                    "error": state.get("error"),
+                    "retry_count": state.get("retry_count", 0),
+                },
+            )
+        except ImportError:
+            pass
 
     updated_log = _tool_calls_ctx.get([])
     logger.info("audit_complete", run_id=state["run_id"], resolution=resolution)

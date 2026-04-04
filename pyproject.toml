@@ -26,6 +26,7 @@ dependencies = [
     "google-api-python-client>=2.155.0",
     "structlog>=25.1.0",
     "python-dotenv>=1.0.0",
+    "sentry-sdk[fastapi]>=2.0.0",
 ]
 
 [project.optional-dependencies]

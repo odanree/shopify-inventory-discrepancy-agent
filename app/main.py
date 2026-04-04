@@ -23,9 +23,29 @@ def _parse_redis_conn_info(redis_url: str) -> dict:
     }
 
 
+def _init_sentry(settings) -> None:
+    if not settings.sentry_dsn:
+        return
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+
+        sentry_sdk.init(
+            dsn=settings.sentry_dsn,
+            environment=settings.app_env,
+            traces_sample_rate=0.2,
+            integrations=[FastApiIntegration(), SqlalchemyIntegration()],
+        )
+        logger.info("sentry_initialized", env=settings.app_env)
+    except ImportError:
+        logger.warning("sentry_sdk_not_installed", hint="pip install sentry-sdk[fastapi]")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    _init_sentry(settings)
 
     structlog.configure(
         processors=[
