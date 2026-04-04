@@ -3,8 +3,16 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 
 from tests.conftest import _make_state
+
+
+@pytest.fixture(autouse=True)
+def _init_graph_with_memory_saver():
+    """Ensure the graph is initialized with MemorySaver for all tests in this module."""
+    from app.agent.graph import init_graph
+    init_graph(MemorySaver())
 
 
 @pytest.mark.asyncio

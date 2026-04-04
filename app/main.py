@@ -1,3 +1,4 @@
+import asyncio
 import structlog
 from contextlib import asynccontextmanager
 
@@ -9,6 +10,17 @@ from app.config import get_settings
 from app.db.session import init_db
 
 logger = structlog.get_logger()
+
+
+def _parse_redis_conn_info(redis_url: str) -> dict:
+    """Parse redis://host:port/db into kwargs for AsyncRedisSaver.from_conn_info."""
+    from urllib.parse import urlparse
+    parsed = urlparse(redis_url)
+    return {
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 6379,
+        "db": int(parsed.path.lstrip("/") or 0),
+    }
 
 
 @asynccontextmanager
@@ -26,6 +38,7 @@ async def lifespan(app: FastAPI):
         ]
     )
 
+    # Primary Redis client (decode_responses=True for business logic keys)
     app.state.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     await init_db()
 
@@ -34,7 +47,28 @@ async def lifespan(app: FastAPI):
     from app.services.slack_client import SlackClient
     from app.services.google_sheets import GoogleSheetsClient
     from app.agent.tools import inject_tool_dependencies
+    from app.agent.graph import init_graph
     from app.db.session import AsyncSessionLocal
+
+    # AsyncRedisSaver uses its own binary-safe connection (NOT decode_responses=True)
+    # so it must not share the app.state.redis client.
+    try:
+        from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+        conn_info = _parse_redis_conn_info(settings.redis_url)
+        checkpointer = AsyncRedisSaver.from_conn_info(**conn_info)
+        await checkpointer.asetup()
+        app.state.checkpointer = checkpointer
+        logger.info("checkpointer_initialized", backend="AsyncRedisSaver")
+    except ImportError:
+        from langgraph.checkpoint.memory import MemorySaver
+        checkpointer = MemorySaver()
+        app.state.checkpointer = checkpointer
+        logger.warning(
+            "checkpointer_fallback",
+            reason="langgraph-checkpoint-redis not installed; using MemorySaver",
+        )
+
+    init_graph(checkpointer)
 
     app.state.shopify = InventoryShopifyClient(
         domain=settings.shopify_shop_domain,
@@ -47,7 +81,7 @@ async def lifespan(app: FastAPI):
         service_account_json_path=settings.google_service_account_json,
         spreadsheet_id=settings.audit_spreadsheet_id,
     )
-    # Proposal cache: run_id → proposal dict (in-memory, single-process)
+    # Proposal cache: run_id → proposal dict (in-memory, supplements checkpoint state)
     app.state.proposal_cache = {}
 
     inject_tool_dependencies(
@@ -59,12 +93,28 @@ async def lifespan(app: FastAPI):
         redis=app.state.redis,
     )
 
+    # Start scheduler as background task (fires reconciliation on interval)
+    app.state.scheduler_task = None
+    if settings.scheduler_enabled:
+        from app.scheduler import start_scheduler
+        app.state.scheduler_task = asyncio.create_task(start_scheduler(app))
+
     logger.info("startup_complete", env=settings.app_env)
     yield
+
+    if app.state.scheduler_task is not None:
+        app.state.scheduler_task.cancel()
+        try:
+            await app.state.scheduler_task
+        except asyncio.CancelledError:
+            pass
 
     await app.state.shopify.close()
     await app.state.slack.close()
     await app.state.redis.aclose()
+    # AsyncRedisSaver may expose aclose; MemorySaver does not
+    if hasattr(app.state.checkpointer, "aclose"):
+        await app.state.checkpointer.aclose()
     logger.info("shutdown_complete")
 
 
@@ -79,8 +129,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-from app.routers import discrepancies, approvals, health  # noqa: E402
+from app.routers import discrepancies, approvals, health, inventory_webhook  # noqa: E402
 
 app.include_router(discrepancies.router)
 app.include_router(approvals.router)
 app.include_router(health.router)
+app.include_router(inventory_webhook.router)

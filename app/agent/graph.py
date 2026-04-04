@@ -2,8 +2,11 @@
 
 The graph stops (interrupts) BEFORE the apply_mutation node to require human approval.
 Resume via the /api/approvals/{run_id} endpoint.
+
+Checkpointer is initialized at startup via init_graph(checkpointer) so that
+AsyncRedisSaver can be set up asynchronously in the FastAPI lifespan context.
+MemorySaver is used as a fallback when running tests (injected by conftest).
 """
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from app.agent.nodes import (
@@ -17,10 +20,17 @@ from app.agent.nodes import (
 from app.agent.state import DiscrepancyState
 from app.models.discrepancy import ResolutionProposal
 
-_checkpointer = MemorySaver()
+# Module-level graph reference — set by init_graph() during app startup.
+# None until init_graph() is called; accessing it before that raises AttributeError.
+graph = None
 
 
-def build_graph():
+def build_graph(checkpointer):
+    """Build and compile the LangGraph state machine with the given checkpointer.
+
+    Args:
+        checkpointer: Any LangGraph checkpointer (AsyncRedisSaver, MemorySaver, etc.)
+    """
     builder = StateGraph(DiscrepancyState)
 
     builder.add_node("detect", detect_discrepancy)
@@ -39,12 +49,19 @@ def build_graph():
     builder.add_edge("audit", END)
 
     return builder.compile(
-        checkpointer=_checkpointer,
+        checkpointer=checkpointer,
         interrupt_before=["apply_mutation"],
     )
 
 
-graph = build_graph()
+def init_graph(checkpointer) -> None:
+    """Called once from the FastAPI lifespan after the checkpointer is ready.
+
+    This function sets the module-level `graph` variable so all callers
+    (start_workflow, resume_workflow, get_current_state) use the same instance.
+    """
+    global graph
+    graph = build_graph(checkpointer)
 
 
 async def start_workflow(initial_state: DiscrepancyState) -> tuple[str, ResolutionProposal]:
@@ -52,6 +69,9 @@ async def start_workflow(initial_state: DiscrepancyState) -> tuple[str, Resoluti
 
     Returns (run_id, proposal) for the operator approval UI.
     """
+    if graph is None:
+        raise RuntimeError("Graph not initialized. Call init_graph() first.")
+
     config = {"configurable": {"thread_id": initial_state["run_id"]}}
     result = await graph.ainvoke(initial_state, config=config)
 
@@ -77,12 +97,17 @@ async def resume_workflow(
     """Resume after human approval decision.
 
     If approved=True, the graph runs apply_mutation → notify → audit.
-    If approved=False, apply_mutation is called with approval_granted=False
-    (it will skip the mutation) and the flow continues to audit.
+    If approved=False, apply_mutation skips the mutation and the flow continues to audit.
+
+    Note: graph.ainvoke(None, config) is the LangGraph API for resuming from an
+    interrupt point. Passing None as the input means "continue from checkpoint state".
     """
+    if graph is None:
+        raise RuntimeError("Graph not initialized. Call init_graph() first.")
+
     config = {"configurable": {"thread_id": run_id}}
 
-    # Inject the approval decision into the checkpoint state
+    # Inject the approval decision into the checkpointed state before resuming
     await graph.aupdate_state(
         config,
         {
@@ -92,13 +117,15 @@ async def resume_workflow(
         },
     )
 
-    # Resume: ainvoke(None, config) continues from the interrupt point
+    # Resume from the interrupt point (apply_mutation node)
     result = await graph.ainvoke(None, config=config)
     return result
 
 
 async def get_current_state(run_id: str) -> dict | None:
     """Return the current checkpointed state for a run, or None if not found."""
+    if graph is None:
+        return None
     config = {"configurable": {"thread_id": run_id}}
     snapshot = await graph.aget_state(config)
     if snapshot is None or snapshot.values is None:

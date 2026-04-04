@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     shopify_shop_domain: str = "example.myshopify.com"
     shopify_access_token: str = ""
     shopify_api_version: str = "2024-01"
+    shopify_webhook_secret: str = ""
 
     # Anthropic
     anthropic_api_key: str = ""
@@ -32,6 +33,19 @@ class Settings(BaseSettings):
     # Slack
     slack_webhook_url: str = ""
     slack_alerts_channel: str = "#inventory-alerts"
+
+    # LangFuse tracing
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_enabled: bool = True
+
+    # Discrepancy detection
+    discrepancy_threshold_pct: float = 5.0
+
+    # Scheduler
+    scheduler_enabled: bool = True
+    scheduler_interval_minutes: int = 60
 
     # App
     app_env: str = "development"
