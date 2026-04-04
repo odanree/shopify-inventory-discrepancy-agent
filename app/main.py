@@ -128,12 +128,23 @@ async def lifespan(app: FastAPI):
         from app.scheduler import start_scheduler
         app.state.scheduler_task = asyncio.create_task(start_scheduler(app))
 
+    # Start weekly report scheduler
+    from app.services.weekly_report import start_weekly_report_scheduler
+    app.state.weekly_report_task = asyncio.create_task(
+        start_weekly_report_scheduler(app), name="weekly-report-scheduler"
+    )
+
     logger.info("startup_complete", env=settings.app_env)
     yield
 
     app.state.notification_task.cancel()
+    app.state.weekly_report_task.cancel()
     try:
-        await app.state.notification_task
+        await asyncio.gather(
+            app.state.notification_task,
+            app.state.weekly_report_task,
+            return_exceptions=True,
+        )
     except asyncio.CancelledError:
         pass
 

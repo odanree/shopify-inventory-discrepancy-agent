@@ -40,12 +40,22 @@ class EventRouter:
 class NotificationWorker:
     """Asyncio daemon: subscribe to NOTIFICATIONS_CHANNEL, dispatch to Slack."""
 
+    HEARTBEAT_KEY = "agent:heartbeat:inventory-discrepancy-worker"
+    HEARTBEAT_INTERVAL = 300
+    HEARTBEAT_TTL = 700
+
     def __init__(self, redis_client, slack_client):
         self._redis = redis_client
         self._slack = slack_client
 
     async def run(self, settings) -> None:
-        """Subscribe and dispatch in a crash-retry loop. Runs until cancelled."""
+        """Run subscribe loop and heartbeat loop concurrently. Runs until cancelled."""
+        await asyncio.gather(
+            self._run_subscribe_with_retry(settings),
+            self._heartbeat_loop(),
+        )
+
+    async def _run_subscribe_with_retry(self, settings) -> None:
         while True:
             try:
                 await self._subscribe_loop(settings)
@@ -54,6 +64,22 @@ class NotificationWorker:
             except Exception as exc:
                 logger.error("notification_worker_crashed", error=str(exc))
                 await asyncio.sleep(5)
+
+    async def _heartbeat_loop(self) -> None:
+        """Pulse a Redis TTL key every HEARTBEAT_INTERVAL seconds to prove the worker is alive."""
+        while True:
+            try:
+                await self._redis.set(
+                    self.HEARTBEAT_KEY,
+                    datetime.now(timezone.utc).isoformat(),
+                    ex=self.HEARTBEAT_TTL,
+                )
+                logger.debug("worker_heartbeat_pulsed")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("worker_heartbeat_failed", error=str(exc))
+            await asyncio.sleep(self.HEARTBEAT_INTERVAL)
 
     async def _subscribe_loop(self, settings) -> None:
         pubsub = self._redis.pubsub()
