@@ -122,10 +122,27 @@ async def investigate(state: DiscrepancyState) -> DiscrepancyState:
 
     _tool_calls_ctx.set(list(state.get("tool_calls_log", [])))
 
-    # Query inventory levels
+    # Query inventory levels at the primary location
     levels_result = await get_inventory_levels.ainvoke(
         {"inventory_item_id": inventory_item_id, "location_ids": [location_id]}
     )
+
+    # Query inventory levels at ALL locations (for transfer opportunity detection)
+    available_locations: list[dict] = []
+    try:
+        from app.agent.tools import _shopify_client
+        if _shopify_client is not None:
+            all_levels = await _shopify_client.get_all_inventory_levels(inventory_item_id)
+            available_locations = [
+                {
+                    "id": lv.get("location", {}).get("id", ""),
+                    "name": lv.get("location", {}).get("name", ""),
+                    "available": lv.get("available", 0),
+                }
+                for lv in all_levels
+            ]
+    except Exception as exc:
+        logger.warning("investigate_all_levels_failed", run_id=state["run_id"], error=str(exc))
 
     # Query recent adjustments
     adj_result = await get_recent_adjustments.ainvoke(
@@ -168,6 +185,7 @@ async def investigate(state: DiscrepancyState) -> DiscrepancyState:
         "investigation_complete",
         run_id=state["run_id"],
         open_orders=open_orders_count,
+        locations_found=len(available_locations),
     )
 
     return {
@@ -176,8 +194,34 @@ async def investigate(state: DiscrepancyState) -> DiscrepancyState:
         "open_orders": open_orders,
         "open_orders_count": open_orders_count,
         "root_cause_analysis": root_cause,
+        "available_locations": available_locations,
         "tool_calls_log": updated_log,
     }
+
+
+def _find_transfer_source(
+    available_locations: list[dict],
+    primary_location_id: str,
+    shortage: int,
+) -> dict | None:
+    """Return the location with the most surplus that can cover the shortage, or None."""
+    primary_gid = (
+        primary_location_id
+        if primary_location_id.startswith("gid://")
+        else f"gid://shopify/Location/{primary_location_id}"
+    )
+    candidates = []
+    for loc in available_locations:
+        loc_id = loc.get("id", "")
+        if loc_id == primary_gid or primary_location_id in loc_id:
+            continue  # skip the deficient location itself
+        available = loc.get("available", 0)
+        if available >= shortage:
+            candidates.append(loc)
+    if not candidates:
+        return None
+    # Prefer location with the most available inventory
+    return max(candidates, key=lambda l: l.get("available", 0))
 
 
 async def propose_resolution(state: DiscrepancyState) -> DiscrepancyState:
@@ -187,21 +231,37 @@ async def propose_resolution(state: DiscrepancyState) -> DiscrepancyState:
     severity = state.get("severity", "minor")
     open_orders_count = state.get("open_orders_count", 0)
     expected = state["expected_quantity"]
+    actual = state["actual_quantity"]
+    shortage = expected - actual  # positive means under-stocked at primary location
+
+    transfer_from_location_id: str | None = None
+    transfer_quantity: int | None = None
+
+    # Check for transfer opportunity: primary location is short AND another has enough
+    available_locations = state.get("available_locations") or []
+    transfer_source = None
+    if shortage > 0 and available_locations:
+        transfer_source = _find_transfer_source(
+            available_locations, state["location_id"], shortage
+        )
 
     # Rule-based proposal
     if severity == "critical":
         action = "hold_for_review"
     elif severity == "major" and open_orders_count > 5:
         action = "hold_for_review"
-    elif severity == "major":
-        action = "adjust_to_expected"
-    elif severity == "moderate":
+    elif severity in ("major", "moderate") and transfer_source:
+        # Surplus available elsewhere — propose a transfer instead of a raw adjustment
+        action = "transfer_inventory"
+        transfer_from_location_id = transfer_source["id"]
+        transfer_quantity = shortage
+    elif severity in ("major", "moderate"):
         action = "adjust_to_expected"
     else:
         # minor
         action = "hold_for_review"
 
-    proposed_quantity = expected  # default: restore to expected
+    proposed_quantity = expected  # target quantity at primary location after resolution
 
     logger.info(
         "proposal_generated",
@@ -209,32 +269,36 @@ async def propose_resolution(state: DiscrepancyState) -> DiscrepancyState:
         action=action,
         severity=severity,
         proposed_quantity=proposed_quantity,
+        transfer_source=transfer_source.get("name") if transfer_source else None,
     )
 
     # Emit approval request — NotificationWorker posts the Slack interactive message.
     # The agent does not block on delivery; the interrupt handles the approval window.
     if _event_router is not None:
         settings = get_settings()
-        await _event_router.emit(
-            "approval_request",
-            {
-                "run_id": state["run_id"],
-                "sku": state["sku"],
-                "discrepancy_pct": state.get("discrepancy_pct", 0.0),
-                "severity": severity,
-                "proposed_action": action,
-                "proposed_quantity": proposed_quantity,
-                "expected_quantity": expected,
-                "open_orders_count": open_orders_count or 0,
-                "root_cause_analysis": state.get("root_cause_analysis", ""),
-                "channel": settings.slack_alerts_channel,
-            },
-        )
+        event_payload = {
+            "run_id": state["run_id"],
+            "sku": state["sku"],
+            "discrepancy_pct": state.get("discrepancy_pct", 0.0),
+            "severity": severity,
+            "proposed_action": action,
+            "proposed_quantity": proposed_quantity,
+            "expected_quantity": expected,
+            "open_orders_count": open_orders_count or 0,
+            "root_cause_analysis": state.get("root_cause_analysis", ""),
+            "channel": settings.slack_alerts_channel,
+        }
+        if transfer_source:
+            event_payload["transfer_from_location"] = transfer_source.get("name", "")
+            event_payload["transfer_quantity"] = transfer_quantity
+        await _event_router.emit("approval_request", event_payload)
 
     return {
         **state,
         "proposed_action": action,
         "proposed_quantity": proposed_quantity,
+        "transfer_from_location_id": transfer_from_location_id,
+        "transfer_quantity": transfer_quantity,
         # approval_granted remains None — graph will interrupt before apply_mutation
     }
 
@@ -243,6 +307,7 @@ async def apply_mutation(state: DiscrepancyState) -> DiscrepancyState:
     """Execute the approved inventory action. Blocked entirely if approval_granted != True."""
     from app.agent.tools import (
         adjust_inventory_level,
+        transfer_inventory,
         update_order_tags_for_hold,
         _approval_granted_ctx,
         _tool_calls_ctx,
@@ -304,6 +369,26 @@ async def apply_mutation(state: DiscrepancyState) -> DiscrepancyState:
             mutation_result = result
             if not result.get("success"):
                 raise RuntimeError(result.get("error", "Mutation failed"))
+
+        elif action == "transfer_inventory":
+            from_loc = state.get("transfer_from_location_id")
+            qty = state.get("transfer_quantity")
+            if not from_loc or not qty:
+                raise RuntimeError(
+                    "transfer_inventory: missing transfer_from_location_id or transfer_quantity"
+                )
+            result = await transfer_inventory.ainvoke(
+                {
+                    "inventory_item_id": state["inventory_item_id"],
+                    "from_location_id": from_loc,
+                    "to_location_id": state["location_id"],
+                    "quantity": qty,
+                    "reason": "Inventory rebalance — approved by operator",
+                }
+            )
+            mutation_result = result
+            if not result.get("success"):
+                raise RuntimeError(result.get("error", "Transfer mutation failed"))
 
     except PermissionError as exc:
         # Should never happen since we set _approval_granted_ctx above, but safety net

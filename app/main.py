@@ -144,10 +144,12 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-from app.routers import discrepancies, approvals, health, inventory_webhook, slack_actions  # noqa: E402
+from app.routers import discrepancies, approvals, health, inventory_webhook, slack_actions, admin, dashboard  # noqa: E402
 
 app.include_router(discrepancies.router)
 app.include_router(approvals.router)
 app.include_router(health.router)
 app.include_router(inventory_webhook.router)
 app.include_router(slack_actions.router)
+app.include_router(admin.router)
+app.include_router(dashboard.router)

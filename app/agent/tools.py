@@ -88,6 +88,14 @@ class AppendSheetsRowArgs(BaseModel):
     values: list
 
 
+class TransferInventoryArgs(BaseModel):
+    inventory_item_id: str = Field(description="Shopify inventory item GID or numeric ID")
+    from_location_id: str = Field(description="Source location GID or numeric ID")
+    to_location_id: str = Field(description="Destination location GID or numeric ID")
+    quantity: int = Field(description="Number of units to transfer")
+    reason: str = Field(default="other", description="Shopify inventoryMoveQuantities reason")
+
+
 class WriteAuditRecordArgs(BaseModel):
     sku: str
     discrepancy_pct: float
@@ -214,6 +222,55 @@ async def update_order_tags_for_hold(order_ids: list[str], tags: list[str]) -> d
         return result
 
 
+@tool(args_schema=TransferInventoryArgs)
+async def transfer_inventory(
+    inventory_item_id: str,
+    from_location_id: str,
+    to_location_id: str,
+    quantity: int,
+    reason: str = "other",
+) -> dict:
+    """Transfer inventory units between Shopify locations. REQUIRES prior human approval."""
+    args = {
+        "inventory_item_id": inventory_item_id,
+        "from_location_id": from_location_id,
+        "to_location_id": to_location_id,
+        "quantity": quantity,
+        "reason": reason,
+    }
+
+    if not _approval_granted_ctx.get(False):
+        raise PermissionError(
+            "transfer_inventory requires approval_granted=True. "
+            "This tool must only be called after human approval."
+        )
+
+    idempotency_key = (
+        f"shopify:inventory:transfer:{inventory_item_id}:{from_location_id}:{to_location_id}:{quantity}"
+    )
+    if _idempotency_service is not None:
+        is_new = await _idempotency_service.check_and_set(idempotency_key, ttl_seconds=3600)
+        if not is_new:
+            logger.info("inventory_transfer_deduped", key=idempotency_key)
+            result = {"success": True, "deduped": True}
+            _log_call("transfer_inventory", args, result, True)
+            return result
+
+    try:
+        if _shopify_client is None:
+            raise RuntimeError("Shopify client not injected")
+        move_result = await _shopify_client.move_inventory(
+            inventory_item_id, from_location_id, to_location_id, quantity, reason
+        )
+        result = {"success": True, "data": move_result}
+        _log_call("transfer_inventory", args, result, True)
+        return result
+    except Exception as exc:
+        result = {"success": False, "error": str(exc)}
+        _log_call("transfer_inventory", args, result, False)
+        return result
+
+
 @tool(args_schema=AppendSheetsRowArgs)
 async def append_google_sheets_row(spreadsheet_id: str, values: list) -> dict:
     """Append an audit row to Google Sheets."""
@@ -297,6 +354,7 @@ ALL_TOOLS = [
     get_recent_adjustments,
     get_open_orders_for_sku,
     adjust_inventory_level,
+    transfer_inventory,
     update_order_tags_for_hold,
     append_google_sheets_row,
     write_audit_record,

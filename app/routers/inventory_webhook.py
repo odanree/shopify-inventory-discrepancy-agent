@@ -20,6 +20,7 @@ import structlog
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from app.config import get_settings
+from app.services import kill_switch
 
 logger = structlog.get_logger()
 
@@ -78,17 +79,22 @@ async def _run_discrepancy_workflow(
         "actual_quantity": actual,
         "discrepancy_pct": 0.0,
         "severity": None,
+        "available_locations": None,
         "recent_adjustments": None,
         "open_orders": None,
         "open_orders_count": None,
         "root_cause_analysis": None,
         "proposed_action": None,
         "proposed_quantity": None,
+        "transfer_from_location_id": None,
+        "transfer_quantity": None,
         "approval_granted": None,
         "approved_by": None,
         "approval_notes": None,
         "mutation_applied": False,
         "mutation_result": None,
+        "verification_passed": None,
+        "retry_count": 0,
         "slack_notified": False,
         "sheets_row": None,
         "tool_calls_log": [],
@@ -133,6 +139,12 @@ async def inventory_level_updated(
         raw_body = await request.body()
         payload = json.loads(raw_body)
         logger.warning("inventory_webhook_hmac_skipped", reason="SHOPIFY_WEBHOOK_SECRET not set")
+
+    # Kill switch check
+    settings_obj = get_settings()
+    if not await kill_switch.is_enabled(request.app.state.redis, settings_obj.shopify_shop_domain):
+        logger.warning("kill_switch_active", event="inventory_levels/update")
+        return {"status": "accepted", "action": "suppressed_kill_switch"}
 
     # Idempotency check
     idempotency = request.app.state.idempotency

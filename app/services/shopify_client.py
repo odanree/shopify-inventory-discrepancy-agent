@@ -80,6 +80,19 @@ mutation SetInventoryQuantity($input: InventorySetOnHandQuantitiesInput!) {
 }
 """
 
+INVENTORY_MOVE_MUTATION = """
+mutation MoveInventory($input: InventoryMoveQuantitiesInput!) {
+  inventoryMoveQuantities(input: $input) {
+    userErrors { field message }
+    inventoryAdjustmentGroup {
+      createdAt
+      reason
+      changes { name delta quantityAfterChange }
+    }
+  }
+}
+"""
+
 TAGS_ADD_MUTATION = """
 mutation TagsAdd($id: ID!, $tags: [String!]!) {
   tagsAdd(id: $id, tags: $tags) {
@@ -158,6 +171,68 @@ class InventoryShopifyClient:
                     raise
                 await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
         raise last_error or RuntimeError("GraphQL request failed after retries")
+
+    async def get_all_inventory_levels(self, inventory_item_id: str) -> list[dict]:
+        """Return inventory levels at ALL locations for an item.
+
+        Uses the same INVENTORY_LEVELS_QUERY with an empty locationIds list — Shopify
+        returns all locations when the filter list is empty.
+        """
+        gid = (
+            inventory_item_id
+            if inventory_item_id.startswith("gid://")
+            else f"gid://shopify/InventoryItem/{inventory_item_id}"
+        )
+        data = await self.execute(INVENTORY_LEVELS_QUERY, {"itemId": gid, "locationIds": []})
+        item = data.get("inventoryItem") or {}
+        levels_edges = item.get("inventoryLevels", {}).get("edges", [])
+        return [edge["node"] for edge in levels_edges]
+
+    async def move_inventory(
+        self,
+        inventory_item_id: str,
+        from_location_id: str,
+        to_location_id: str,
+        quantity: int,
+        reason: str = "other",
+    ) -> dict:
+        """Transfer inventory between two Shopify locations using inventoryMoveQuantities."""
+        item_gid = (
+            inventory_item_id
+            if inventory_item_id.startswith("gid://")
+            else f"gid://shopify/InventoryItem/{inventory_item_id}"
+        )
+        from_gid = (
+            from_location_id
+            if from_location_id.startswith("gid://")
+            else f"gid://shopify/Location/{from_location_id}"
+        )
+        to_gid = (
+            to_location_id
+            if to_location_id.startswith("gid://")
+            else f"gid://shopify/Location/{to_location_id}"
+        )
+        data = await self.execute(
+            INVENTORY_MOVE_MUTATION,
+            {
+                "input": {
+                    "reason": reason,
+                    "moves": [
+                        {
+                            "inventoryItemId": item_gid,
+                            "fromLocationId": from_gid,
+                            "toLocationId": to_gid,
+                            "quantity": quantity,
+                        }
+                    ],
+                }
+            },
+        )
+        result = data.get("inventoryMoveQuantities", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise RuntimeError(f"inventoryMoveQuantities errors: {errors}")
+        return result
 
     async def get_inventory_levels(
         self, inventory_item_id: str, location_ids: list[str]

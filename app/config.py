@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_interval_minutes: int = 60
 
+    # Admin
+    admin_api_key: str = ""  # if empty, admin endpoints require no auth (dev only)
+
     # App
     app_env: str = "development"
     log_level: str = "INFO"

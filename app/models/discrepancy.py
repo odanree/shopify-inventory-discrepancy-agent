@@ -31,3 +31,6 @@ class ResolutionProposal(BaseModel):
     proposed_quantity: int
     affected_orders: list[str] = Field(default_factory=list)
     estimated_impact: str = ""
+    # Populated when proposed_action == "transfer_inventory"
+    transfer_from_location_id: Optional[str] = None
+    transfer_quantity: Optional[int] = None
