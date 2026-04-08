@@ -55,6 +55,57 @@ Then `docker compose up -d --build <service>` — Alembic will find `002` and ru
 
 ---
 
+## L003 — Stamping Alembic at a revision does NOT run the migration's DDL
+
+**Date:** 2026-04-08  
+**Area:** Database migrations / Alembic
+
+### What happened
+
+When adding Alembic mid-life (after tables were bootstrapped via `create_all`), the DB was
+stamped at revision `002` via SQL:
+
+```sql
+INSERT INTO alembic_version VALUES ('002');
+```
+
+This told Alembic "you are already at 002". On the next `alembic upgrade head`, it found no
+pending migrations and exited cleanly — but the actual DDL in migration 002 (adding
+`input_tokens`, `output_tokens`, `cost_usd` columns) never ran against the live database.
+
+The columns were absent, so token data was silently dropped on every write. The service
+started without errors because SQLAlchemy writes are non-strict about missing nullable columns
+in shadow mode, and the tool caught no exception.
+
+### Root cause
+
+`alembic stamp` marks the DB as *already at* a revision. It does not execute the migration.
+If you stamp at `002` but the DB was bootstrapped before `002` existed, the `002` DDL is
+permanently skipped.
+
+### Fix
+
+Run the migration DDL manually, then the stamp is accurate:
+
+```sql
+ALTER TABLE discrepancy_audit_logs ADD COLUMN IF NOT EXISTS input_tokens INTEGER;
+ALTER TABLE discrepancy_audit_logs ADD COLUMN IF NOT EXISTS output_tokens INTEGER;
+ALTER TABLE discrepancy_audit_logs ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION;
+```
+
+Because the migration uses `ADD COLUMN IF NOT EXISTS`, this is idempotent — safe to run
+whether or not Alembic later runs the migration itself.
+
+### Prevention going forward
+
+- When stamping an existing DB at revision N, always verify the DB actually has the schema
+  that revision N describes (check `\d table_name`).
+- If columns from revision N are missing, run the DDL manually before stamping.
+- Alternatively: stamp at the revision *before* the missing one (`001`), then run
+  `alembic upgrade head` — this executes the real migration.
+
+---
+
 ## L002 — `docker compose run -e KEY=value` is shadowed by service environment
 
 **Date:** 2026-04-08  

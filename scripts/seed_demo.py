@@ -29,7 +29,7 @@ except ImportError:
     sys.exit(1)
 
 BASE_URL = "http://localhost:8000"
-DISCREPANCY_PATH = "/api/discrepancies"
+DISCREPANCY_PATH = "/api/discrepancies/detect"
 
 SCENARIOS = {
     "critical": {
@@ -102,7 +102,7 @@ async def send_discrepancy(client: httpx.AsyncClient, base_url: str, scenario_ke
             json=scenario["payload"],
             timeout=10.0,
         )
-        status = "✅" if resp.status_code in (200, 201, 202) else "❌"
+        status = "OK" if resp.status_code in (200, 201, 202) else "FAIL"
         try:
             result = resp.json()
             run_id = result.get("run_id", result.get("detail", "?"))
@@ -111,7 +111,7 @@ async def send_discrepancy(client: httpx.AsyncClient, base_url: str, scenario_ke
         print(f"  {status} [{resp.status_code}] {scenario['name']}")
         print(f"     run_id={run_id}")
     except Exception as exc:
-        print(f"  ❌ {scenario['name']}: {exc}")
+        print(f"  FAIL {scenario['name']}: {exc}")
 
 
 async def main():
@@ -123,7 +123,7 @@ async def main():
 
     scenarios = {args.scenario: SCENARIOS[args.scenario]} if args.scenario else SCENARIOS
 
-    print(f"\n📦 Inventory Discrepancy Agent — Demo Seed")
+    print(f"\nInventory Discrepancy Agent -- Demo Seed")
     print(f"   Target: {args.url}")
     print(f"   Scenarios: {len(scenarios)}\n")
 
@@ -131,9 +131,9 @@ async def main():
         try:
             health = await client.get(f"{args.url}/health", timeout=5.0)
             hdata = health.json()
-            print(f"   /health → {hdata.get('status', '?')} | checks: {hdata.get('checks', {})}\n")
+            print(f"   /health -> {hdata.get('status', '?')} | checks: {hdata.get('checks', {})}\n")
         except Exception as exc:
-            print(f"   ⚠ Could not reach {args.url}/health: {exc}")
+            print(f"   WARNING: Could not reach {args.url}/health: {exc}")
             print("   Make sure the service is running: docker-compose up\n")
 
         for key, scenario in scenarios.items():
