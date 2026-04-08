@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import func, select
 
-from app.db.session import AsyncSessionLocal
+import app.db.session as _db_session
 from app.models.db import DiscrepancyAuditLog
 
 logger = structlog.get_logger()
@@ -49,7 +49,7 @@ async def get_stats(request: Request):
     settings = get_settings()
     seven_days_ago = datetime.now(timezone.utc) - _SEVEN_DAYS
 
-    async with AsyncSessionLocal() as session:
+    async with _db_session.AsyncSessionLocal() as session:
         total_7d = await session.scalar(
             select(func.count(DiscrepancyAuditLog.id)).where(
                 DiscrepancyAuditLog.created_at >= seven_days_ago
