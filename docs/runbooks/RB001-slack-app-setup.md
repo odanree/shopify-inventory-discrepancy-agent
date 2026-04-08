@@ -12,10 +12,26 @@ Step-by-step guide to configure the Slack app that powers:
 
 ---
 
+## Environment variables
+
+See `docs/runbooks/env.md` (gitignored) for real values.
+
+| Variable | Description |
+|----------|-------------|
+| `$PROD_HOST` | Production server hostname or IP |
+| `$PROD_USER` | SSH user (e.g. `root`) |
+| `$SERVICE_URL` | Public HTTPS URL of the agent |
+| `$DB_USER` | PostgreSQL app user |
+| `$DB_NAME` | PostgreSQL database name |
+| `$INVENTORY_AGENT_CONTAINER` | Docker container name |
+| `$POSTGRES_CONTAINER` | Docker postgres container name |
+
+---
+
 ## Prerequisites
 
 - Admin access to the Slack workspace
-- The agent deployed and reachable at `https://shopify-inventory.danhle.net`
+- The agent deployed and reachable at `$SERVICE_URL`
 - Access to `portfolio-infra/.env` on the deployment server
 
 ---
@@ -58,12 +74,12 @@ Interactivity allows Slack to POST button-click events back to the agent.
 2. Toggle **Interactivity** to On
 3. Set **Request URL** to:
    ```
-   https://shopify-inventory.danhle.net/api/slack/actions
+   $SERVICE_URL/api/slack/actions
    ```
 4. Click **Save Changes**
 
 Slack will verify the URL is reachable. If verification fails, check that the agent is
-running and the Caddy reverse proxy is correctly routing `shopify-inventory.danhle.net`.
+running and the reverse proxy is correctly routing the domain.
 
 ---
 
@@ -97,13 +113,13 @@ environment:
 
 ```bash
 # Sync .env to server
-scp portfolio-infra/.env root@65.108.243.192:/opt/portfolio-infra/.env
+scp portfolio-infra/.env $PROD_USER@$PROD_HOST:/opt/portfolio-infra/.env
 
 # Restart container (no rebuild needed — env-only change)
-ssh root@65.108.243.192 "cd /opt/portfolio-infra && docker compose up -d --no-build shopify-inventory-agent"
+ssh $PROD_USER@$PROD_HOST "cd /opt/portfolio-infra && docker compose up -d --no-build shopify-inventory-agent"
 
 # Verify env vars are set
-ssh root@65.108.243.192 "docker exec shopify-inventory-agent env | grep SLACK"
+ssh $PROD_USER@$PROD_HOST "docker exec $INVENTORY_AGENT_CONTAINER env | grep SLACK"
 ```
 
 ---
@@ -112,13 +128,13 @@ ssh root@65.108.243.192 "docker exec shopify-inventory-agent env | grep SLACK"
 
 ```bash
 # Trigger a discrepancy
-python scripts/seed_demo.py --url https://shopify-inventory.danhle.net --scenario minor
+python scripts/seed_demo.py --url $SERVICE_URL --scenario minor
 
 # Wait ~5s, check Slack for the approval message with Approve/Reject buttons
 # Click Approve in Slack
 # Verify resolution message appears in Slack
 # Verify audit record in DB
-ssh root@65.108.243.192 "docker exec portfolio-postgres psql -U portfolio_user -d inventory_discrepancy \
+ssh $PROD_USER@$PROD_HOST "docker exec $POSTGRES_CONTAINER psql -U $DB_USER -d $DB_NAME \
   -c 'SELECT sku, proposed_action, approved, approved_by FROM discrepancy_audit_logs ORDER BY created_at DESC LIMIT 1;'"
 ```
 
@@ -135,7 +151,7 @@ seed_demo.py
       → Slack channel receives Block Kit message with Approve/Reject buttons
 
 User clicks Approve in Slack
-  → Slack POSTs to /api/slack/actions (signed with SLACK_SIGNING_SECRET)
+  → Slack POSTs to $SERVICE_URL/api/slack/actions (signed with SLACK_SIGNING_SECRET)
   → slack_actions.py verifies signature, extracts run_id
   → resume_workflow(approved=True, reviewer_id=slack_username)
   → graph resumes: apply_mutation → verify → notify → audit
