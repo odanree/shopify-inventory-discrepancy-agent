@@ -26,9 +26,9 @@ jobs:
       - name: Run tests
         run: pytest --tb=short -q
         env:
-          DATABASE_URL: sqlite+aiosqlite:///:memory:
-          REDIS_URL: redis://localhost:6379/0
-          SHOPIFY_WEBHOOK_SECRET: test-secret
-          ANTHROPIC_API_KEY: sk-ant-test
-          GOOGLE_SERVICE_ACCOUNT_JSON: /nonexistent/sa.json
-          AUDIT_SPREADSHEET_ID: test-sheet-id
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          REDIS_URL: "redis://localhost:6379/0"
+          SHOPIFY_WEBHOOK_SECRET: "test-secret"
+          ANTHROPIC_API_KEY: "sk-ant-test"
+          GOOGLE_SERVICE_ACCOUNT_JSON: "/nonexistent/sa.json"
+          AUDIT_SPREADSHEET_ID: "test-sheet-id"
