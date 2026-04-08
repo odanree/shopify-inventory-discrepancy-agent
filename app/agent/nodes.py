@@ -543,7 +543,7 @@ async def verify_mutation(state: DiscrepancyState) -> DiscrepancyState:
             if not target.startswith("gid://"):
                 target = f"gid://shopify/Location/{target}"
             if loc_id == target or state["location_id"] in loc_id:
-                actual_qty_after = leveloc.get("available")
+                actual_qty_after = level.get("available")
                 break
 
         if actual_qty_after is None:
