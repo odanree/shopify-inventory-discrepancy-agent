@@ -123,7 +123,7 @@ async def main():
 
     scenarios = {args.scenario: SCENARIOS[args.scenario]} if args.scenario else SCENARIOS
 
-    print(f"\nInventory Discrepancy Agent -- Demo Seed")
+    print("\nInventory Discrepancy Agent -- Demo Seed")
     print(f"   Target: {args.url}")
     print(f"   Scenarios: {len(scenarios)}\n")
 

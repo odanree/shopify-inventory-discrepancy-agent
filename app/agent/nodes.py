@@ -230,7 +230,7 @@ def _find_transfer_source(
     if not candidates:
         return None
     # Prefer location with the most available inventory
-    return max(candidates, key=lambda l: l.get("available", 0))
+    return max(candidates, key=lambda loc: loc.get("available", 0))
 
 
 async def propose_resolution(state: DiscrepancyState) -> DiscrepancyState:
@@ -543,7 +543,7 @@ async def verify_mutation(state: DiscrepancyState) -> DiscrepancyState:
             if not target.startswith("gid://"):
                 target = f"gid://shopify/Location/{target}"
             if loc_id == target or state["location_id"] in loc_id:
-                actual_qty_after = level.get("available")
+                actual_qty_after = leveloc.get("available")
                 break
 
         if actual_qty_after is None:

@@ -17,7 +17,6 @@ _LAST_SENT_KEY = "agent:weekly_report:inventory:last_sent"
 async def send_weekly_report(db_factory, slack_client, settings) -> None:
     """Generate and deliver the weekly report."""
     from app.models.db import DiscrepancyAuditLog
-    from sqlalchemy import func, select
     seven_days_ago = datetime.now(timezone.utc) - _SEVEN_DAYS
 
     try:

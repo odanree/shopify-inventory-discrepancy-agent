@@ -86,7 +86,7 @@ def main(endpoint_url: str, dry_run: bool) -> None:
             else:
                 webhook_id = result.get("id")
                 print(f"  [CREATED]  {topic} -> {address} (id={webhook_id})")
-                print(f"             Copy HMAC secret to SHOPIFY_WEBHOOK_SECRET in .env")
+                print("             Copy HMAC secret to SHOPIFY_WEBHOOK_SECRET in .env")
 
     print("\nDone.")
 
