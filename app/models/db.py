@@ -30,6 +30,9 @@ class DiscrepancyAuditLog(Base):
     resolution_applied: Mapped[str | None] = mapped_column(String(128), nullable=True)
     resolution_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     google_sheets_row_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )

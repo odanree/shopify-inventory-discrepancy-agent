@@ -68,6 +68,8 @@ async def detect_and_investigate(
         "mutation_result": None,
         "slack_notified": False,
         "sheets_row": None,
+        "llm_input_tokens": None,
+        "llm_output_tokens": None,
         "tool_calls_log": [],
         "error": None,
         "messages": [],

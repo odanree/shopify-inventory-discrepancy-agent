@@ -319,6 +319,13 @@ async def write_audit_record(
         from datetime import timezone
 
         async with _db_factory() as session:
+            input_tokens = metadata.get("input_tokens")
+            output_tokens = metadata.get("output_tokens")
+            # claude-sonnet-4-6: $3/MTok input, $15/MTok output
+            cost_usd = None
+            if input_tokens is not None and output_tokens is not None:
+                cost_usd = (input_tokens * 3.0 + output_tokens * 15.0) / 1_000_000
+
             record = DiscrepancyAuditLog(
                 run_id=metadata.get("run_id", "unknown"),
                 sku=sku,
@@ -334,6 +341,9 @@ async def write_audit_record(
                 resolution_applied=resolution,
                 resolution_notes=metadata.get("approval_notes"),
                 google_sheets_row_id=metadata.get("sheets_row"),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
                 resolved_at=datetime.now(timezone.utc) if resolution != "pending" else None,
             )
             session.add(record)

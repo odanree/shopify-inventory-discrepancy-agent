@@ -175,10 +175,15 @@ async def investigate(state: DiscrepancyState) -> DiscrepancyState:
         invoke_config = {"callbacks": [lf_handler]} if lf_handler else {}
         response = await llm.ainvoke(messages, config=invoke_config)
         root_cause = response.content.strip()
+        usage = response.usage_metadata or {}
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
         if lf_handler:
             lf_handler.flush()
     except Exception as exc:
         logger.error("investigate_llm_failed", run_id=state["run_id"], error=str(exc))
+        input_tokens = 0
+        output_tokens = 0
 
     updated_log = _tool_calls_ctx.get([])
     logger.info(
@@ -186,6 +191,8 @@ async def investigate(state: DiscrepancyState) -> DiscrepancyState:
         run_id=state["run_id"],
         open_orders=open_orders_count,
         locations_found=len(available_locations),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
     return {
@@ -195,6 +202,8 @@ async def investigate(state: DiscrepancyState) -> DiscrepancyState:
         "open_orders_count": open_orders_count,
         "root_cause_analysis": root_cause,
         "available_locations": available_locations,
+        "llm_input_tokens": input_tokens,
+        "llm_output_tokens": output_tokens,
         "tool_calls_log": updated_log,
     }
 
@@ -599,6 +608,8 @@ async def audit(state: DiscrepancyState) -> DiscrepancyState:
                 "approval_granted": state.get("approval_granted"),
                 "approval_notes": state.get("approval_notes"),
                 "sheets_row": state.get("sheets_row"),
+                "input_tokens": state.get("llm_input_tokens"),
+                "output_tokens": state.get("llm_output_tokens"),
             },
         }
     )

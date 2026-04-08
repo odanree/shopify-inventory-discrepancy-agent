@@ -98,6 +98,8 @@ async def _run_discrepancy_workflow(
         "shadowed": None,
         "slack_notified": False,
         "sheets_row": None,
+        "llm_input_tokens": None,
+        "llm_output_tokens": None,
         "tool_calls_log": [],
         "error": None,
         "messages": [],

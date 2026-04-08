@@ -50,6 +50,10 @@ class DiscrepancyState(TypedDict):
     # Set when agent_mode == "shadow": mutations skipped, full graph still runs
     shadowed: bool | None
 
+    # Token usage from LLM investigate call
+    llm_input_tokens: int | None
+    llm_output_tokens: int | None
+
     # Metadata
     tool_calls_log: list[dict[str, Any]]
     error: str | None
