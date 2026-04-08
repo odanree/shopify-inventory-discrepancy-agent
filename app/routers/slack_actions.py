@@ -13,7 +13,7 @@ import json
 import time
 
 import structlog
-from fastapi import APIRouter, Form, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.agent.graph import resume_workflow
 from app.config import get_settings
@@ -42,7 +42,7 @@ def _verify_slack_signature(
 
 
 @router.post("/api/slack/actions")
-async def handle_slack_action(request: Request, payload: str = Form(...)) -> Response:
+async def handle_slack_action(request: Request) -> Response:
     """Receive Slack interactive component payloads (button clicks).
 
     Slack expects a 200 response within 3 seconds; the actual workflow
@@ -50,17 +50,25 @@ async def handle_slack_action(request: Request, payload: str = Form(...)) -> Res
     """
     settings = get_settings()
 
-    # Verify Slack signing secret when configured
+    # Read body once — Form() would consume the stream before we can verify
+    body = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
     if settings.slack_signing_secret:
-        body = await request.body()
-        timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
-        signature = request.headers.get("X-Slack-Signature", "")
         if not _verify_slack_signature(body, timestamp, signature, settings.slack_signing_secret):
             logger.warning("slack_action_invalid_signature")
             raise HTTPException(status_code=403, detail="Invalid Slack signature")
 
+    # Parse the URL-encoded form body to extract the `payload` field
+    from urllib.parse import parse_qs
+    form = parse_qs(body.decode("utf-8"))
+    payload_raw = form.get("payload", [None])[0]
+    if not payload_raw:
+        raise HTTPException(status_code=400, detail="Missing payload field")
+
     try:
-        data = json.loads(payload)
+        data = json.loads(payload_raw)
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid payload JSON")
 
