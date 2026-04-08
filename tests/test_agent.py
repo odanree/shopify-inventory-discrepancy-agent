@@ -81,15 +81,13 @@ async def test_full_workflow_approved_path():
     mock_sheets._spreadsheet_id = "test-sheet"
     tools._sheets_client = mock_sheets
 
-    mock_db = AsyncMock()
     mock_session = AsyncMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=None)
     mock_session.add = MagicMock()
     mock_session.commit = AsyncMock()
     mock_session.refresh = AsyncMock()
-    mock_db.return_value = mock_session
-    tools._db_factory = mock_db
+    tools._db_factory = MagicMock(return_value=mock_session)
 
     mock_idempotency = AsyncMock()
     mock_idempotency.check_and_set = AsyncMock(return_value=True)
@@ -100,6 +98,7 @@ async def test_full_workflow_approved_path():
         mock_llm = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = "Likely sync lag from recent bulk import."
+        mock_response.usage_metadata = {"input_tokens": 200, "output_tokens": 80}
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_llm_factory.return_value = mock_llm
 
@@ -121,3 +120,63 @@ async def test_full_workflow_approved_path():
             run_id=run_id, approved=True, reviewer_id="ops-user", notes="looks correct"
         )
         assert final["approval_granted"] is True
+        assert final["llm_input_tokens"] == 200
+
+
+@pytest.mark.asyncio
+async def test_full_workflow_rejected_path():
+    """Rejection path: graph resumes with approved=False, mutation must be skipped."""
+    from app.agent import tools
+
+    mock_shopify = AsyncMock()
+    mock_shopify.get_inventory_levels = AsyncMock(return_value=[])
+    mock_shopify.get_unfulfilled_orders_for_sku = AsyncMock(return_value=[])
+    mock_shopify.set_inventory_quantity = AsyncMock()
+    tools._shopify_client = mock_shopify
+
+    mock_sheets = AsyncMock()
+    mock_sheets.find_row_by_run_id = AsyncMock(return_value=None)
+    mock_sheets.append_row = AsyncMock(return_value={"updates": {"updatedRange": "A11"}})
+    mock_sheets._spreadsheet_id = "test-sheet"
+    tools._sheets_client = mock_sheets
+
+    mock_session2 = AsyncMock()
+    mock_session2.__aenter__ = AsyncMock(return_value=mock_session2)
+    mock_session2.__aexit__ = AsyncMock(return_value=None)
+    mock_session2.add = MagicMock()
+    mock_session2.commit = AsyncMock()
+    mock_session2.refresh = AsyncMock()
+    tools._db_factory = MagicMock(return_value=mock_session2)
+
+    mock_idempotency = AsyncMock()
+    mock_idempotency.check_and_set = AsyncMock(return_value=True)
+    mock_idempotency.delete_workflow_state = AsyncMock()
+    tools._idempotency_service = mock_idempotency
+
+    with patch("app.agent.nodes._get_llm") as mock_llm_factory:
+        mock_llm = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = "Possible theft -- recommend physical audit."
+        mock_response.usage_metadata = {"input_tokens": 300, "output_tokens": 100}
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm_factory.return_value = mock_llm
+
+        from app.agent.graph import start_workflow, resume_workflow
+
+        initial = _make_state(
+            run_id="test-reject-001",
+            expected_quantity=200,
+            actual_quantity=50,   # 75% gap → critical
+        )
+
+        run_id, proposal = await start_workflow(initial)
+        assert proposal.severity == "critical"
+
+        # Reject the proposal
+        final = await resume_workflow(
+            run_id=run_id, approved=False, reviewer_id="ops-user", notes="needs physical audit first"
+        )
+
+    assert final["approval_granted"] is False
+    assert final["mutation_applied"] is False  # no Shopify write on rejection
+    mock_shopify.set_inventory_quantity.assert_not_called()
