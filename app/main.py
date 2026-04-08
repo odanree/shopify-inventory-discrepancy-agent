@@ -76,12 +76,13 @@ async def lifespan(app: FastAPI):
     # so it must not share the app.state.redis client.
     try:
         from langgraph.checkpoint.redis.aio import AsyncRedisSaver
-        conn_info = _parse_redis_conn_info(settings.redis_url)
-        checkpointer = AsyncRedisSaver.from_conn_info(**conn_info)
+        _ctx = AsyncRedisSaver.from_conn_string(settings.redis_url)
+        checkpointer = await _ctx.__aenter__()
+        app.state._checkpointer_ctx = _ctx
         await checkpointer.asetup()
         app.state.checkpointer = checkpointer
         logger.info("checkpointer_initialized", backend="AsyncRedisSaver")
-    except ImportError:
+    except (ImportError, Exception):
         from langgraph.checkpoint.memory import MemorySaver
         checkpointer = MemorySaver()
         app.state.checkpointer = checkpointer
