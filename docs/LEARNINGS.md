@@ -106,6 +106,93 @@ whether or not Alembic later runs the migration itself.
 
 ---
 
+## L004 — `from module import name` captures `None` at import time
+
+**Date:** 2026-04-08  
+**Area:** Python / FastAPI
+
+### What happened
+
+`dashboard.py` imported `AsyncSessionLocal` directly:
+
+```python
+from app.db.session import AsyncSessionLocal
+```
+
+`AsyncSessionLocal` starts as `None` at module level and is assigned inside `init_db()`,
+which runs during the FastAPI lifespan. By the time `init_db()` set it, the dashboard
+module already held a reference to the original `None` — the binding never updated.
+
+Every request to `/api/dashboard/stats` raised `TypeError: 'NoneType' object is not callable`.
+
+### Root cause
+
+`from module import name` binds to the *value* of `name` at import time, not to the
+module attribute itself. Reassigning the module-level variable later does not update
+existing references in other modules.
+
+### Fix
+
+Import the module and access the attribute at call time:
+
+```python
+import app.db.session as _db_session
+# ...
+async with _db_session.AsyncSessionLocal() as session:
+```
+
+This dereferences the attribute each time, always getting the current value.
+
+### Prevention going forward
+
+Any module-level variable that is `None` at import and set later (lazy init, lifespan,
+dependency injection) must be accessed via the module reference, not a direct import.
+
+---
+
+## L005 — FastAPI `Form(...)` parameter consumes the request stream
+
+**Date:** 2026-04-08  
+**Area:** FastAPI / Slack integration
+
+### What happened
+
+The Slack action handler used `payload: str = Form(...)` as a function parameter so
+FastAPI would parse the URL-encoded body automatically. The handler also called
+`await request.body()` to verify the Slack signing signature. This raised:
+
+```
+RuntimeError: Stream consumed
+```
+
+### Root cause
+
+When FastAPI sees a `Form(...)` parameter, it reads and parses the entire request body
+before the handler function executes. The underlying stream can only be read once, so
+the subsequent `await request.body()` call finds nothing left and raises.
+
+### Fix
+
+Read the raw body manually first, then parse the form fields:
+
+```python
+body = await request.body()
+# verify signature against body...
+from urllib.parse import parse_qs
+form = parse_qs(body.decode("utf-8"))
+payload_raw = form.get("payload", [None])[0]
+```
+
+Remove `Form(...)` from the function signature entirely.
+
+### Prevention going forward
+
+Never mix `Form(...)` parameters with `await request.body()` in the same handler.
+If you need raw body access (for HMAC verification), always read the body manually
+and parse it yourself.
+
+---
+
 ## L002 — `docker compose run -e KEY=value` is shadowed by service environment
 
 **Date:** 2026-04-08  
