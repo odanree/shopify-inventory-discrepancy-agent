@@ -124,6 +124,92 @@ async def test_full_workflow_approved_path():
 
 
 @pytest.mark.asyncio
+async def test_route_after_verify_passed():
+    """verification_passed=True should route to notify."""
+    from app.agent.graph import _route_after_verify
+
+    state = _make_state(verification_passed=True, retry_count=0)
+    assert _route_after_verify(state) == "notify"
+
+
+@pytest.mark.asyncio
+async def test_route_after_verify_retries():
+    """verification_passed=False with retries remaining should cycle back to apply_mutation."""
+    from app.agent.graph import _route_after_verify
+
+    state = _make_state(verification_passed=False, retry_count=0)
+    assert _route_after_verify(state) == "apply_mutation"
+
+    state = _make_state(verification_passed=False, retry_count=1)
+    assert _route_after_verify(state) == "apply_mutation"
+
+
+@pytest.mark.asyncio
+async def test_route_after_verify_max_retries():
+    """verification_passed=False at retry_count >= 2 should route to notify (not dead-letter)."""
+    from app.agent.graph import _route_after_verify
+
+    state = _make_state(verification_passed=False, retry_count=2)
+    assert _route_after_verify(state) == "notify"
+
+    state = _make_state(verification_passed=False, retry_count=5)
+    assert _route_after_verify(state) == "notify"
+
+
+@pytest.mark.asyncio
+async def test_detect_discrepancy_surplus():
+    """Actual > expected (surplus) should still compute discrepancy_pct correctly."""
+    from app.agent.nodes import detect_discrepancy
+
+    state = _make_state(expected_quantity=80, actual_quantity=120)
+    result = await detect_discrepancy(state)
+    # abs(80 - 120) / 80 * 100 = 50%
+    assert result["discrepancy_pct"] == 50.0
+    assert result["severity"] == "critical"
+
+
+@pytest.mark.asyncio
+async def test_get_current_state_at_interrupt():
+    """After start_workflow the graph should be paused at apply_mutation with proposal data."""
+    from app.agent import tools
+    from app.agent.graph import get_current_state, start_workflow
+
+    mock_shopify = AsyncMock()
+    mock_shopify.get_inventory_levels = AsyncMock(return_value=[])
+    mock_shopify.get_unfulfilled_orders_for_sku = AsyncMock(return_value=[])
+    mock_shopify.get_all_inventory_levels = AsyncMock(return_value=[])
+    tools._shopify_client = mock_shopify
+
+    mock_idempotency = AsyncMock()
+    mock_idempotency.check_and_set = AsyncMock(return_value=True)
+    tools._idempotency_service = mock_idempotency
+
+    with patch("app.agent.nodes._get_llm") as mock_llm_factory:
+        mock_llm = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = "Likely data sync lag."
+        mock_response.usage_metadata = {"input_tokens": 50, "output_tokens": 20}
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm_factory.return_value = mock_llm
+
+        initial = _make_state(
+            run_id="test-state-001",
+            expected_quantity=100,
+            actual_quantity=70,
+        )
+        run_id, proposal = await start_workflow(initial)
+
+    # Graph should be paused — get_current_state should return the checkpointed state
+    snapshot = await get_current_state(run_id)
+    assert snapshot is not None
+    assert snapshot["severity"] in ("minor", "moderate", "major", "critical")
+    assert snapshot["root_cause_analysis"] is not None
+    assert snapshot["proposed_action"] is not None
+    # approval_granted must still be None — interrupt hasn't been resolved yet
+    assert snapshot["approval_granted"] is None
+
+
+@pytest.mark.asyncio
 async def test_full_workflow_rejected_path():
     """Rejection path: graph resumes with approved=False, mutation must be skipped."""
     from app.agent import tools
